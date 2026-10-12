@@ -23,7 +23,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 抓取 / 清洗 / 存活检测
+      - name: 安装 Xray（用于真实代理验证）
+        run: |
+          curl -sL -o /tmp/xray.zip \
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q -o /tmp/xray.zip -d /tmp/xraybin
+          chmod +x /tmp/xraybin/xray
+          /tmp/xraybin/xray version | head -1
+          echo "/tmp/xraybin" >> "$GITHUB_PATH"
+
+      - name: 抓取 / 清洗 / 归属过滤 / 真实代理验证
         run: python filter.py
 
       - name: 有变化才提交

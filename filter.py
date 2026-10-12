@@ -20,11 +20,19 @@
 import asyncio
 import base64
 import bisect
+import concurrent.futures
 import datetime
 import gzip
 import ipaddress
 import json
+import os
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
+import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -60,6 +68,16 @@ TIMEOUT = 4.0       # 单节点 TCP 连接超时（秒）
 # 只用来兜住极端增长，不做筛选。刻意不靠这个值做排名：探测点在机房，
 # 按它的延迟砍数量会误杀对本地好的节点。
 MAX_NODES = 400
+
+# ---- 真实代理验证 ----
+# TCP 通 ≠ 能当代理用：公共免费节点里绝大多数是「服务器还在、端口开着，但配置/凭据已失效」。
+# 实测 68 个 TCP 存活的节点里只有约 8% 真能穿过它取到网页。所以必须真连一次。
+# 用 v2rayN 同款核心（Xray），穿节点取 generate_204 —— 与 v2rayN 的「真连接延迟」同路数。
+XRAY_BIN = os.environ.get("XRAY_BIN") or shutil.which("xray") or "xray"
+VERIFY_URL = "https://www.google.com/generate_204"
+VERIFY_TIMEOUT = 10     # 单个节点穿代理取网页的超时（秒）
+VERIFY_WORKERS = 12     # 并发验证数（每个节点起一个 xray 进程、独占一个本地端口）
+VERIFY_BASE_PORT = 12000
 
 ROOT = Path(__file__).resolve().parent
 
@@ -263,6 +281,133 @@ async def probe(host: str, port: int, sem: asyncio.Semaphore):
             return None
 
 
+# ---------- 真实代理验证（穿节点取网页） ----------
+
+def _bare_host(x: str) -> str:
+    return x.strip().strip("[]")
+
+
+def build_outbound(uri: str):
+    """节点 URI → (xray outbound, streamSettings, err)。"""
+    scheme, rest = uri.split("://", 1)
+    scheme = scheme.lower()
+    frag = rest.split("#", 1)[0]
+    q = dict(urllib.parse.parse_qsl(frag.split("?", 1)[1])) if "?" in frag else {}
+    core = frag.split("?", 1)[0]
+
+    # Xray 26.2.6+ 移除了 TLS 的 allowInsecure（改为证书 pin），带它内核起不来
+    if q.get("allowInsecure") == "1" or q.get("insecure") == "1":
+        return None, None, "allowInsecure"
+
+    net = q.get("type", "tcp")
+    sec = q.get("security", "none")
+    stream = {"network": net, "security": "none"}
+    if net == "ws":
+        # Xray 26 起 headers.Host 已废弃，改用独立的 host 字段
+        stream["wsSettings"] = {"path": q.get("path", "/"), "host": q.get("host", "")}
+    elif net == "grpc":
+        stream["grpcSettings"] = {"serviceName": q.get("serviceName", "")}
+    if sec == "tls":
+        stream["security"] = "tls"
+        stream["tlsSettings"] = {"serverName": q.get("sni") or q.get("host") or ""}
+    elif sec == "reality":
+        stream["security"] = "reality"
+        stream["realitySettings"] = {
+            "serverName": q.get("sni", ""), "publicKey": q.get("pbk", ""),
+            "shortId": q.get("sid", ""), "fingerprint": q.get("fp", "chrome"),
+        }
+
+    if scheme == "ss":
+        userinfo, hostport = core.rsplit("@", 1)
+        dec = b64d(userinfo)
+        if ":" not in dec:
+            return None, None, "ss 解析失败"
+        method, password = dec.split(":", 1)
+        h, p = hostport.rsplit(":", 1)
+        return {"protocol": "shadowsocks", "settings": {"servers": [
+            {"address": _bare_host(h), "port": int(p), "method": method, "password": password}]}}, \
+            {"network": "tcp", "security": "none"}, None
+
+    if scheme == "vmess":
+        try:
+            o = json.loads(b64d(core))
+            ob = {"protocol": "vmess", "settings": {"vnext": [{"address": o["add"], "port": int(o["port"]),
+                  "users": [{"id": o["id"], "alterId": int(o.get("aid", 0)), "security": o.get("scy", "auto")}]}]}}
+        except Exception:
+            return None, None, "vmess 解析失败"
+        st = {"network": o.get("net", "tcp"), "security": "none"}
+        if st["network"] == "ws":
+            st["wsSettings"] = {"path": o.get("path", "/"), "host": o.get("host", "")}
+        if str(o.get("tls", "")).lower() == "tls":
+            st["security"] = "tls"
+            st["tlsSettings"] = {"serverName": o.get("host") or o.get("add")}
+        return ob, st, None
+
+    if "@" not in core:
+        return None, None, "缺少 userinfo"
+    cred, hp = core.rsplit("@", 1)
+    h, p = hp.rsplit(":", 1)
+    if scheme == "vless":
+        return {"protocol": "vless", "settings": {"vnext": [{"address": _bare_host(h), "port": int(p),
+              "users": [{"id": cred, "encryption": "none", "flow": q.get("flow", "")}]}]}}, stream, None
+    if scheme == "trojan":
+        return {"protocol": "trojan", "settings": {"servers": [
+            {"address": _bare_host(h), "port": int(p), "password": urllib.parse.unquote(cred)}]}}, stream, None
+    return None, None, f"未支持 {scheme}"
+
+
+def verify_node(args):
+    """穿节点取 VERIFY_URL，返回 (line, ms, err)。"""
+    idx, (line, _tcp_ms) = args
+    ob, stream, err = build_outbound(line)
+    if err:
+        return line, None, err
+    ob["tag"] = "proxy"
+    ob["streamSettings"] = stream
+    # 每个节点独占一个端口：早期版本按 worker 槽位复用端口，前一个 xray 还没释放就冲突，
+    # 表现为「xray 启动失败」，会白白误杀可用节点。
+    local = VERIFY_BASE_PORT + (idx % 400)
+    cfg = {
+        "log": {"loglevel": "error"},
+        "inbounds": [{"tag": "s", "port": local, "listen": "127.0.0.1",
+                      "protocol": "socks", "settings": {"udp": False}}],
+        "outbounds": [ob, {"tag": "direct", "protocol": "freedom"}],
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(cfg, f)
+        path = f.name
+    proc = None
+    try:
+        proc = subprocess.Popen([XRAY_BIN, "run", "-c", path],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(25):
+            try:
+                socket.create_connection(("127.0.0.1", local), timeout=0.3).close()
+                break
+            except Exception:
+                if proc.poll() is not None:
+                    return line, None, "xray 启动失败"
+                time.sleep(0.2)
+        t0 = time.time()
+        r = subprocess.run(["curl", "-s", "-o", os.devnull, "-w", "%{http_code}",
+                            "--socks5-hostname", f"127.0.0.1:{local}",
+                            "--max-time", str(VERIFY_TIMEOUT), VERIFY_URL],
+                           capture_output=True, text=True)
+        code = (r.stdout or "").strip()
+        ms = (time.time() - t0) * 1000
+        return (line, ms, None) if code == "204" else (line, None, f"HTTP {code or '超时'}")
+    except Exception as e:
+        return line, None, type(e).__name__
+    finally:
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+        Path(path).unlink(missing_ok=True)
+
+
 # ---------- 主流程 ----------
 
 async def main() -> int:
@@ -320,17 +465,34 @@ async def main() -> int:
 
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(*(probe(h, p, sem) for _, h, p in cand))
-    alive = sorted(
-        ((line, ms) for (line, _, _), ms in zip(cand, results) if ms is not None),
-        key=lambda x: x[1],
-    )
-    print(f"[probe] 存活 {len(alive)} 个（超时 {TIMEOUT}s，并发 {CONCURRENCY}）")
+    alive = [(line, ms) for (line, _, _), ms in zip(cand, results) if ms is not None]
+    print(f"[probe] TCP 存活 {len(alive)} 个（超时 {TIMEOUT}s，并发 {CONCURRENCY}）")
 
     if not alive:
-        print("[abort] 没有一个存活，保持原文件不动", file=sys.stderr)
+        print("[abort] 没有一个 TCP 存活，保持原文件不动", file=sys.stderr)
         return 1
 
-    keep = alive[:MAX_NODES]
+    # 真实代理验证：TCP 通 ≠ 能用（公共免费节点里绝大多数是端口开着但配置已失效）
+    print(f"[verify] 对 {len(alive)} 个做真实代理验证（并发 {VERIFY_WORKERS}）")
+    working, reasons = [], {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as ex:
+        for line, ms, err in ex.map(verify_node, enumerate(alive)):
+            if ms is not None:
+                working.append((line, ms))
+            else:
+                reasons[err] = reasons.get(err, 0) + 1
+    print(f"[verify] 真能当代理用：{len(working)} / {len(alive)}")
+    if reasons:
+        top = "，".join(f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1])[:5])
+        print(f"[verify] 失败原因：{top}")
+
+    if not working:
+        print("[abort] 没有一个能真正代理，保持原文件不动", file=sys.stderr)
+        return 1
+
+    # ⚠️ 这个延迟是**探测点（机房）**的数字，对本地没有参考价值；排序只为输出稳定
+    working.sort(key=lambda x: x[1])
+    keep = working[:MAX_NODES]
     plain = "\n".join(line for line, _ in keep) + "\n"
     (ROOT / "sub-plain.txt").write_text(plain, encoding="utf-8")
     (ROOT / "sub.txt").write_text(
