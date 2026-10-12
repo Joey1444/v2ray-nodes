@@ -87,6 +87,18 @@ GitHub Actions 的探测点在美国/欧洲机房，**不等于你在肯尼亚�
 
 补源时：先用 `sources.txt` 注释区里记的「已排查但不采用」清单排除已知无效项，再加新源。
 
+## 维护工具（`tools/`）
+
+改源、排查问题时用，**不影响主流程**：
+
+| 工具 | 用途 |
+|---|---|
+| `python tools/screen_sources.py <url...>` | 体检候选源：报「候选节点数 / 美国独立 IP 数」 |
+| `python tools/net_new.py <url...>` | 算候选源对现有 `sources.txt` 的**净新增**——**这才是选源的判据** |
+| `python tools/proxy_test.py <节点文件>` | 独立真实代理测试器：逐节点穿代理取 `generate_204`，报哪些真能用 |
+
+Xray 位置：环境变量 `XRAY_BIN` → PATH → 本机 v2rayN 自带（`D:\apps\v2rayN\bin\xray\xray.exe`）。
+
 ## 为什么跑在 GitHub Actions 而不是本机 n8n
 
 官方文档明确：**「The use of standard GitHub-hosted runners is free: In public repositories.」** 本仓库是公开仓库，**Actions 分钟数免费且不限**，唯一的硬限额与本项目无关（单 job 6 小时、单次运行 35 天——本流程约 50 秒）。

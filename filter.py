@@ -68,7 +68,16 @@ MAX_NODES = 400
 # TCP 通 ≠ 能当代理用：公共免费节点里绝大多数是「服务器还在、端口开着，但配置/凭据已失效」。
 # 实测 68 个 TCP 存活的节点里只有约 8% 真能穿过它取到网页。所以必须真连一次。
 # 用 v2rayN 同款核心（Xray），穿节点取 generate_204 —— 与 v2rayN 的「真连接延迟」同路数。
-XRAY_BIN = os.environ.get("XRAY_BIN") or shutil.which("xray") or "xray"
+def _find_xray() -> str:
+    """按优先级找 Xray：显式环境变量 → PATH → 本机 v2rayN 自带的 → 名称兜底。"""
+    for p in (os.environ.get("XRAY_BIN"), shutil.which("xray"),
+              r"D:\apps\v2rayN\bin\xray\xray.exe", "/tmp/xraybin/xray"):
+        if p and (os.path.sep not in p or os.path.exists(p)):
+            return p
+    return "xray"
+
+
+XRAY_BIN = _find_xray()
 VERIFY_URL = "https://www.google.com/generate_204"
 VERIFY_TIMEOUT = 10     # 单个节点穿代理取网页的超时（秒）
 VERIFY_WORKERS = 12     # 并发验证数（每个节点起一个 xray 进程、独占一个本地端口）
