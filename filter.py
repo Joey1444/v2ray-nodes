@@ -27,7 +27,9 @@ UPSTREAMS = [
 
 CONCURRENCY = 200   # 并发探测数
 TIMEOUT = 4.0       # 单节点 TCP 连接超时（秒）
-MAX_NODES = 200     # 最多保留多少个（按探测点延迟升序）
+# 只用来兜住极端增长，不做筛选。设得比实际存活数大，等于「全留」。
+# 刻意不靠这个值做排名：探测点在机房，按它的延迟砍数量会误杀对本地好的节点。
+MAX_NODES = 400
 
 ROOT = Path(__file__).resolve().parent
 
