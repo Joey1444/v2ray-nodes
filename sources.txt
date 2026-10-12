@@ -1,0 +1,18 @@
+# 上游节点源清单 —— 每行一个 URL，# 开头为注释（被停用的源会保留在这里以便恢复）
+#
+# 括号内是它对「美国独立 IP」池的净新增贡献（2026-10-12 实测，合并去重前基线 15）。
+# 选源判据是「净新增」而非仓库大小：有些仓库自身很大，但和已有源高度重复，加了只增加耗时。
+#
+# 已排查但**不采用**的（避免下次重复劳动）：
+#   free-nodes/clashfree        Clash YAML，40 个美国 IP 但净新增 0
+#   ermaozi/get_subscribe       自身 15 个美国 IP，净新增 0
+#   barry-far/V2ray-Configs     整个仓库被 GitHub 以 ToS 封禁
+#   Epodonios / ALIILAPRO / Flik6 / Jsnzkpg        非节点格式（二进制或自定义）
+#   yebekhe / soroushmirzaei / lalatina169 / vveg26 仓库已不存在（404）
+
+https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt
+https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/sub
+https://raw.githubusercontent.com/free18/v2ray/main/v.txt
+https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt
+https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt
+https://raw.githubusercontent.com/mfuu/v2ray/master/sub

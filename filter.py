@@ -36,16 +36,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-UPSTREAMS = [
-    # 每个源都实测过；括号内是它对「美国独立 IP」池的净新增贡献（2026-10-12 实测）。
-    # 合并去重后美国独立 IP：15（单源）→ 88。
-    "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt",        # 基线 15
-    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/sub",                           # +36
-    "https://raw.githubusercontent.com/free18/v2ray/main/v.txt",                               # +17
-    "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt",  # +14
-    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",                   # +4
-    "https://raw.githubusercontent.com/mfuu/v2ray/master/sub",                                 # +2
-]
+# 源清单放在数据文件里（不是代码里），便于脚本自己体检与停用。
+# 每行一个 URL；`#` 开头为注释。连续失败达 DISABLE_AFTER 次会被自动注释掉（可随时手工恢复）。
+SOURCES_FILE = Path(__file__).resolve().parent / "sources.txt"
+STATUS_FILE = Path(__file__).resolve().parent / "sources-status.json"
+DISABLE_AFTER = 5       # 连续失败多少轮就自动停用该源
 
 # 只要这个国家的节点；设为 None 则不做国家过滤
 COUNTRY = "US"
@@ -120,6 +115,51 @@ def b64d(s: str) -> str:
         return base64.b64decode(s + "=" * (-len(s) % 4)).decode("utf-8", "ignore")
     except Exception:
         return ""
+
+
+# ---------- 源体检与自动清理 ----------
+
+def src_name(url: str) -> str:
+    p = url.split("/")
+    return f"{p[3]}/{p[4]}" if len(p) > 5 and "githubusercontent" in url else url
+
+
+def load_sources():
+    if not SOURCES_FILE.exists():
+        return []
+    out = []
+    for line in SOURCES_FILE.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            out.append(s)
+    return out
+
+
+def load_status() -> dict:
+    if STATUS_FILE.exists():
+        try:
+            return json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_status(st: dict) -> None:
+    STATUS_FILE.write_text(
+        json.dumps(st, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def disable_source(url: str) -> bool:
+    """把该源那行注释掉——保留原文，随时可手工恢复（改动在 git diff 里可见）。"""
+    lines = SOURCES_FILE.read_text(encoding="utf-8").splitlines()
+    hit = False
+    for i, line in enumerate(lines):
+        if line.strip() == url:
+            lines[i] = f"# DISABLED auto {line.strip()}"
+            hit = True
+    if hit:
+        SOURCES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return hit
 
 
 # ---------- 节点解析 ----------
@@ -411,18 +451,48 @@ def verify_node(args):
 # ---------- 主流程 ----------
 
 async def main() -> int:
+    sources = load_sources()
+    if not sources:
+        print("[abort] sources.txt 里没有可用源", file=sys.stderr)
+        return 1
+
+    status = load_status()
     raw_lines = []
-    for url in UPSTREAMS:
+    print(f"[source] 共 {len(sources)} 个源，逐个体检")
+    for url in sources:
+        st = status.setdefault(url, {"ok_streak": 0, "fail_streak": 0, "last_nodes": 0})
+        got, valid, err = [], 0, None
         try:
             text = decode_sub(fetch(url))
             got = [l.strip() for l in text.splitlines() if l.strip()]
-            print(f"[fetch] {url}\n         → {len(got)} 行")
-            raw_lines.extend(got)
+            valid = sum(1 for l in got if parse_node(l))
+            if valid == 0:
+                raise RuntimeError("拿不到有效节点行")
         except Exception as e:
-            print(f"[fetch] 失败 {url}: {e}", file=sys.stderr)
+            err = str(e)[:70]
+        if err:
+            st["fail_streak"] = st.get("fail_streak", 0) + 1
+            st["ok_streak"] = 0
+            st["last_error"] = err
+            print(f"[source] ✗ {src_name(url):<32} 连续失败 {st['fail_streak']} · {err}")
+        else:
+            st["fail_streak"] = 0
+            st["ok_streak"] = st.get("ok_streak", 0) + 1
+            st["last_nodes"] = valid
+            st.pop("last_error", None)
+            print(f"[source] ✓ {src_name(url):<32} {len(got):>4} 行（有效 {valid}）")
+            raw_lines.extend(got)
+
+    # 连续失败达阈值 → 自动停用，避免每轮都为死源白等
+    for url, st in list(status.items()):
+        if st.get("fail_streak", 0) >= DISABLE_AFTER and disable_source(url):
+            print(f"[source] ⚠ 自动停用（连续失败 {st['fail_streak']} 次）：{url}")
+            st["disabled_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
+            st["fail_streak"] = 0
+    save_status(status)
 
     if not raw_lines:
-        print("[abort] 上游一条都没拿到，保持原文件不动", file=sys.stderr)
+        print("[abort] 所有源都没拿到东西，保持原文件不动", file=sys.stderr)
         return 1
 
     seen, cand = set(), []
