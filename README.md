@@ -51,10 +51,26 @@ GitHub Actions 的探测点在美国/欧洲机房，**不等于你在肯尼亚�
 
 所以本仓库**只负责筛掉死的、留下活的，不做排名**；**排序请在 v2rayN 里跑「测试真连接延迟」**，那才是你本地视角。
 
+## 上游源
+
+6 个源合并，各源贡献已实测（括号内为对「美国独立 IP」池的**净新增**，2026-10-12）：
+
+| 源 | 净新增 |
+|---|---|
+| [AutoMergePublicNodes](https://github.com/chengaopan/AutoMergePublicNodes) | 基线 15 |
+| [aiboboxx/v2rayfree](https://github.com/aiboboxx/v2rayfree) | +36 |
+| [free18/v2ray](https://github.com/free18/v2ray) | +17 |
+| [mahdibland/ShadowsocksAggregator](https://github.com/mahdibland/ShadowsocksAggregator) | +14 |
+| [peasoft/NoMoreWalls](https://github.com/peasoft/NoMoreWalls) | +4 |
+| [mfuu/v2ray](https://github.com/mfuu/v2ray) | +2 |
+
+**合并去重后美国独立 IP：15（单源）→ 88**，实测存活 68 个。选源判据是「净新增」而非「自身大小」——有些源自身看着大，但和已有源高度重复（如 `ermaozi/get_subscribe` 自身 15 个美国 IP，净新增 0），加进来只增加耗时。
+
 ## 已知限制
 
-- **单源**：目前只吃 AutoMergePublicNodes。要多源可换用 [wzdnzd/aggregator](https://github.com/wzdnzd/aggregator)（重型，需配置 JSON / Telegram 凭证 / Gist token）。
+- **源会失效**：公开节点仓库可能停更、被 GitHub 封（实测 `barry-far/V2ray-Configs` 已被 ToS 封禁）。单个源失败不影响整体运行（逐个 try/except）。补源时照上表方法**先测净新增**，别只看仓库大小。
 - **TCP 存活 ≠ 代理可用**：端口通不代表节点真能转发。要更准得跑真实代理测试，成本高，故留给 v2rayN 本地测。
+- **归属国只是"服务器在美国"**：GeoIP 判的是 IP 归属，不保证流量真的从美国出口。
 - **免费公共节点的安全性**：这些是**陌生人的服务器**，你全部流量都会经过它。**不要用它登录银行、邮箱、社交账号**，也不要用它做账号注册一类的敏感操作。
 
 ## 保持定时不失效
