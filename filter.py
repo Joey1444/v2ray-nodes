@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-公共节点 → 去垃圾 → 存活检测 → 输出可订阅列表
+公共节点 → 去垃圾 → 存活检测 → (可选) 按国家过滤 → 输出可订阅列表
 
 定位：**不自己爬源**。爬取复用 AutoMergePublicNodes 的产出（它自己每约 6 小时刷新一次），
-本脚本只做两件上游没做的事——洗掉垃圾条目、实测 TCP 存活并按延迟排序。
+本脚本只做上游没做的事——洗垃圾、验存活、验归属国。
+
+国家判定用 **DB-IP Lite** 离线库（免费、无需 key、CC BY 4.0），按节点真实 IP 归属地判断，
+**不看节点名**——名字可以随便写，骗不了 GeoIP。
 
 输出：
   sub.txt         base64 订阅（v2rayN 直接订阅这个）
   sub-plain.txt   明文版，方便肉眼检查
 
 只用标准库，无第三方依赖。
+数据来源署名：IP geolocation by DB-IP (https://db-ip.com)
 """
 
 import asyncio
 import base64
+import bisect
+import datetime
+import gzip
 import ipaddress
 import json
 import sys
@@ -25,10 +32,26 @@ UPSTREAMS = [
     "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt",
 ]
 
+# 只要这个国家的节点；设为 None 则不做国家过滤
+COUNTRY = "US"
+
+GEOIP_URL = "https://download.db-ip.com/free/dbip-country-lite-{ym}.csv.gz"
+GEOIP_CACHE = Path(__file__).resolve().parent / "_cache"
+
+# 已知 anycast CDN 段：这些 IP 的位置取决于你从哪解析/连接，GeoIP 判定对它们没有意义。
+# 实测踩过：域名 host（如 *.fly.dev / *.v.3dns.vip）在 GitHub 机房解析得到美国边缘 IP，
+# 但在用户所在国解析会得到另一个边缘——所以「域名 host」一律不采信。
+# 这张表会过期；宁缺毋滥，且只影响候选池大小，不影响正确性。
+CDN_RANGES = [
+    "199.232.0.0/16", "140.248.0.0/16", "151.101.0.0/16", "146.75.0.0/16",  # Fastly
+    "104.16.0.0/13", "172.64.0.0/13", "173.245.48.0/20", "103.21.244.0/22",  # Cloudflare
+]
+CDN_NETS = [ipaddress.ip_network(c) for c in CDN_RANGES]
+
 CONCURRENCY = 200   # 并发探测数
 TIMEOUT = 4.0       # 单节点 TCP 连接超时（秒）
-# 只用来兜住极端增长，不做筛选。设得比实际存活数大，等于「全留」。
-# 刻意不靠这个值做排名：探测点在机房，按它的延迟砍数量会误杀对本地好的节点。
+# 只用来兜住极端增长，不做筛选。刻意不靠这个值做排名：探测点在机房，
+# 按它的延迟砍数量会误杀对本地好的节点。
 MAX_NODES = 400
 
 ROOT = Path(__file__).resolve().parent
@@ -47,6 +70,12 @@ def fetch(url: str) -> str:
         return resp.read().decode("utf-8", "ignore")
 
 
+def fetch_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "node-filter/1.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return resp.read()
+
+
 def decode_sub(raw: str) -> str:
     """订阅可能是「整体 base64」也可能是「明文多行」，两种都吃。"""
     raw = raw.strip()
@@ -55,8 +84,7 @@ def decode_sub(raw: str) -> str:
     if "://" in raw[:200]:
         return raw
     try:
-        pad = "=" * (-len(raw) % 4)
-        return base64.b64decode(raw + pad).decode("utf-8", "ignore")
+        return base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "ignore")
     except Exception:
         return raw
 
@@ -69,7 +97,16 @@ def b64d(s: str) -> str:
         return ""
 
 
-# ---------- 解析 ----------
+# ---------- 节点解析 ----------
+
+# 只认这些「真的是代理节点」的协议。
+# 上游列表里混着大量 http(s):// 链接——那些是别的订阅地址，不是节点，
+# 而它们同样能连上端口，不加白名单就会被当成"存活节点"混进来。
+NODE_SCHEMES = {
+    "vmess", "vless", "trojan", "ss", "ssr",
+    "hysteria", "hysteria2", "hy2", "tuic", "snell", "anytls",
+}
+
 
 def split_hostport(hp: str):
     """'1.2.3.4:80' / '[::1]:443' → (host, port)"""
@@ -83,15 +120,6 @@ def split_hostport(hp: str):
         return host, int(port)
     except ValueError:
         return host, None
-
-
-# 只认这些「真的是代理节点」的协议。
-# 上游列表里混着大量 http(s):// 链接——那些是别的订阅地址，不是节点，
-# 而它们同样能连上端口，不加白名单就会被当成"存活节点"混进来。
-NODE_SCHEMES = {
-    "vmess", "vless", "trojan", "ss", "ssr",
-    "hysteria", "hysteria2", "hy2", "tuic", "snell", "anytls",
-}
 
 
 def parse_node(line: str):
@@ -138,7 +166,77 @@ def usable_host(host: str) -> bool:
                 or ip.is_reserved or ip.is_multicast or ip.is_link_local)
 
 
-# ---------- 探测 ----------
+# ---------- GeoIP（DB-IP Lite） ----------
+
+def _month_candidates(n: int = 3):
+    """当月 → 往前推 n 个月（当月库可能还没发布）。"""
+    d = datetime.date.today().replace(day=1)
+    out = []
+    for _ in range(n):
+        out.append(d.strftime("%Y-%m"))
+        d = (d - datetime.timedelta(days=1)).replace(day=1)
+    return out
+
+
+def _load_geoip_raw() -> bytes:
+    GEOIP_CACHE.mkdir(exist_ok=True)
+    for ym in _month_candidates():
+        cached = GEOIP_CACHE / f"dbip-country-lite-{ym}.csv.gz"
+        if cached.exists() and cached.stat().st_size > 1_000_000:
+            print(f"[geoip] 用本地缓存 {cached.name}")
+            return cached.read_bytes()
+        try:
+            raw = fetch_bytes(GEOIP_URL.format(ym=ym))
+            cached.write_bytes(raw)
+            print(f"[geoip] 下载 {ym}（{len(raw) / 1e6:.1f} MB）")
+            return raw
+        except Exception as e:
+            print(f"[geoip] {ym} 不可用：{e}", file=sys.stderr)
+    raise RuntimeError("DB-IP 库全部拉取失败")
+
+
+def build_country_index(country: str):
+    """返回 (v4_starts, v4_ranges, v6_starts, v6_ranges)，均为升序。"""
+    text = gzip.decompress(_load_geoip_raw()).decode("utf-8", "ignore")
+    v4, v6 = [], []
+    for line in text.splitlines():
+        p = line.split(",")
+        if len(p) != 3 or p[2] != country:
+            continue
+        try:
+            s, e = ipaddress.ip_address(p[0]), ipaddress.ip_address(p[1])
+        except ValueError:
+            continue
+        (v4 if s.version == 4 else v6).append((int(s), int(e)))
+    v4.sort()
+    v6.sort()
+    print(f"[geoip] {country} 段：IPv4 {len(v4)} · IPv6 {len(v6)}")
+    return [r[0] for r in v4], v4, [r[0] for r in v6], v6
+
+
+def _direct_ip(host: str):
+    """只接受直连 IP。域名 host 一律返回 None——解析结果随位置变，判定不可靠。"""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def _is_cdn(ip) -> bool:
+    return any(ip in n for n in CDN_NETS)
+
+
+def in_country(ip, idx) -> bool:
+    starts4, r4, starts6, r6 = idx
+    starts, ranges = (starts4, r4) if ip.version == 4 else (starts6, r6)
+    if not ranges:
+        return False
+    v = int(ip)
+    i = bisect.bisect_right(starts, v) - 1
+    return i >= 0 and v <= ranges[i][1]
+
+
+# ---------- 存活探测 ----------
 
 async def probe(host: str, port: int, sem: asyncio.Semaphore):
     async with sem:
@@ -190,6 +288,29 @@ async def main() -> int:
         cand.append((line, host, port))
     print(f"[parse] 原始 {len(raw_lines)} 行 → 去重去垃圾后 {len(cand)} 个候选")
 
+    if COUNTRY:
+        idx = build_country_index(COUNTRY)
+        kept, n_dom, n_cdn, n_other = [], 0, 0, 0
+        for c in cand:
+            ip = _direct_ip(c[1])
+            if ip is None:
+                n_dom += 1
+                continue
+            if _is_cdn(ip):
+                n_cdn += 1
+                continue
+            if in_country(ip, idx):
+                kept.append(c)
+            else:
+                n_other += 1
+        print(f"[geoip] {len(cand)} 候选 → 域名(不可判) {n_dom} · CDN段 {n_cdn} · 非{COUNTRY} {n_other}"
+              f" → 保留 {len(kept)}")
+        cand = kept
+
+    if not cand:
+        print(f"[abort] 过滤后没有候选节点，保持原文件不动", file=sys.stderr)
+        return 1
+
     sem = asyncio.Semaphore(CONCURRENCY)
     results = await asyncio.gather(*(probe(h, p, sem) for _, h, p in cand))
     alive = sorted(
@@ -208,7 +329,9 @@ async def main() -> int:
     (ROOT / "sub.txt").write_text(
         base64.b64encode(plain.encode("utf-8")).decode("ascii"), encoding="utf-8"
     )
-    print(f"[write] 保留 {len(keep)} 个（最快 {keep[0][1]:.0f}ms / 最慢 {keep[-1][1]:.0f}ms）")
+    scope = f"仅 {COUNTRY}" if COUNTRY else "不过滤国家"
+    print(f"[write] {scope}；保留 {len(keep)} 个"
+          f"（最快 {keep[0][1]:.0f}ms / 最慢 {keep[-1][1]:.0f}ms）")
     return 0
 
 
