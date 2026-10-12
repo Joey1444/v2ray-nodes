@@ -29,7 +29,14 @@ import urllib.request
 from pathlib import Path
 
 UPSTREAMS = [
-    "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt",
+    # 每个源都实测过；括号内是它对「美国独立 IP」池的净新增贡献（2026-10-12 实测）。
+    # 合并去重后美国独立 IP：15（单源）→ 88。
+    "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt",        # 基线 15
+    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/sub",                           # +36
+    "https://raw.githubusercontent.com/free18/v2ray/main/v.txt",                               # +17
+    "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt",  # +14
+    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",                   # +4
+    "https://raw.githubusercontent.com/mfuu/v2ray/master/sub",                                 # +2
 ]
 
 # 只要这个国家的节点；设为 None 则不做国家过滤
