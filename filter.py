@@ -9,9 +9,10 @@
 国家判定用 **DB-IP Lite** 离线库（免费、无需 key、CC BY 4.0），按节点真实 IP 归属地判断，
 **不看节点名**——名字可以随便写，骗不了 GeoIP。
 
-输出：
-  sub.txt         base64 订阅（v2rayN 直接订阅这个）
-  sub-plain.txt   明文版，方便肉眼检查
+输出（每个地区一份，客户端订阅哪个 URL 就是选了哪个地区）：
+  sub-<地区>.txt         base64 订阅（v2rayN 直接订阅这个）
+  sub-<地区>-plain.txt   明文版，方便肉眼检查
+  sub.txt / sub-plain.txt  历史地址，等同美国那一份（老订阅不用改）
 
 只用标准库，无第三方依赖。
 数据来源署名：IP geolocation by DB-IP (https://db-ip.com)
@@ -42,8 +43,20 @@ SOURCES_FILE = Path(__file__).resolve().parent / "sources.txt"
 STATUS_FILE = Path(__file__).resolve().parent / "sources-status.json"
 DISABLE_AFTER = 5       # 连续失败多少轮就自动停用该源
 
-# 只要这个国家的节点；设为 None 则不做国家过滤
-COUNTRY = "US"
+# 地区分组：每组输出一份独立订阅，每份都只含该地区且验证过能真正代理的节点。
+# codes 是 DB-IP 的 ISO 国家/地区码；verify 是穿该地区节点时要取的地址——
+# 大陆节点走 google 必然失败（google 在大陆不通），得换成国内可达的 generate_204。
+# 加一个地区 = 在这里加一行。
+DEFAULT_VERIFY = ("https://www.google.com/generate_204", "204")
+REGIONS = {
+    "us":   {"label": "美国",      "codes": ["US"],       "verify": DEFAULT_VERIFY},
+    "hktw": {"label": "香港/台湾", "codes": ["HK", "TW"], "verify": DEFAULT_VERIFY},
+    # 大陆：google 在大陆不通，只能打国内站；而且必须走 HTTPS——
+    # 公开代理池里大量代理只转发明文，用 HTTP 验它们会全部"通过"，实际不可用。
+    "cn":   {"label": "中国大陆",  "codes": ["CN"],
+             "verify": ("https://www.baidu.com", "200")},
+}
+LEGACY_ALIAS = "us"     # sub.txt 只装这个地区，让已订阅的老地址行为不变
 
 GEOIP_URL = "https://download.db-ip.com/free/dbip-country-lite-{ym}.csv.gz"
 GEOIP_CACHE = Path(__file__).resolve().parent / "_cache"
@@ -78,7 +91,6 @@ def _find_xray() -> str:
 
 
 XRAY_BIN = _find_xray()
-VERIFY_URL = "https://www.google.com/generate_204"
 VERIFY_TIMEOUT = 10     # 单个节点穿代理取网页的超时（秒）
 VERIFY_WORKERS = 12     # 并发验证数（每个节点起一个 xray 进程、独占一个本地端口）
 VERIFY_BASE_PORT = 12000
@@ -134,13 +146,22 @@ def src_name(url: str) -> str:
 
 
 def load_sources():
+    """返回 [(url, scope)]。scope 形如 "cn" = 该源只喂给这个地区；
+    None = 不限定，按 IP 归属地自然分组。
+    写法：行首加 `[cn] ` 前缀，例如 `[cn] https://.../data.txt`。"""
     if not SOURCES_FILE.exists():
         return []
     out = []
     for line in SOURCES_FILE.read_text(encoding="utf-8").splitlines():
         s = line.strip()
-        if s and not s.startswith("#"):
-            out.append(s)
+        if not s or s.startswith("#"):
+            continue
+        scope = None
+        if s.startswith("[") and "]" in s:
+            tag, _, rest = s.partition("]")
+            scope = tag.strip("[").strip().lower() or None
+            s = rest.strip()
+        out.append((s, scope))
     return out
 
 
@@ -163,7 +184,7 @@ def disable_source(url: str) -> bool:
     lines = SOURCES_FILE.read_text(encoding="utf-8").splitlines()
     hit = False
     for i, line in enumerate(lines):
-        if line.strip() == url:
+        if line.strip() == url or line.strip().endswith(url):
             lines[i] = f"# DISABLED auto {line.strip()}"
             hit = True
     if hit:
@@ -179,6 +200,8 @@ def disable_source(url: str) -> bool:
 NODE_SCHEMES = {
     "vmess", "vless", "trojan", "ss", "ssr",
     "hysteria", "hysteria2", "hy2", "tuic", "snell", "anytls",
+    # 公开代理池里的裸 socks 代理（v2rayN 认 socks:// 链接，Xray 有 socks 出口）
+    "socks", "socks5", "socks4",
 }
 
 
@@ -269,23 +292,27 @@ def _load_geoip_raw() -> bytes:
     raise RuntimeError("DB-IP 库全部拉取失败")
 
 
-def build_country_index(country: str):
-    """返回 (v4_starts, v4_ranges, v6_starts, v6_ranges)，均为升序。"""
+def build_region_indexes(codes):
+    """一次解压建多个国家的索引：{code: (v4_starts, v4_ranges, v6_starts, v6_ranges)}。"""
     text = gzip.decompress(_load_geoip_raw()).decode("utf-8", "ignore")
-    v4, v6 = [], []
+    want = set(codes)
+    acc = {c: ([], []) for c in want}
     for line in text.splitlines():
         p = line.split(",")
-        if len(p) != 3 or p[2] != country:
+        if len(p) != 3 or p[2] not in want:
             continue
         try:
             s, e = ipaddress.ip_address(p[0]), ipaddress.ip_address(p[1])
         except ValueError:
             continue
-        (v4 if s.version == 4 else v6).append((int(s), int(e)))
-    v4.sort()
-    v6.sort()
-    print(f"[geoip] {country} 段：IPv4 {len(v4)} · IPv6 {len(v6)}")
-    return [r[0] for r in v4], v4, [r[0] for r in v6], v6
+        (acc[p[2]][0] if s.version == 4 else acc[p[2]][1]).append((int(s), int(e)))
+    out = {}
+    for c, (v4, v6) in acc.items():
+        v4.sort()
+        v6.sort()
+        print(f"[geoip] {c} 段：IPv4 {len(v4)} · IPv6 {len(v6)}")
+        out[c] = ([r[0] for r in v4], v4, [r[0] for r in v6], v6)
+    return out
 
 
 def _direct_ip(host: str):
@@ -300,7 +327,7 @@ def _is_cdn(ip) -> bool:
     return any(ip in n for n in CDN_NETS)
 
 
-def in_country(ip, idx) -> bool:
+def in_region(ip, idx) -> bool:
     starts4, r4, starts6, r6 = idx
     starts, ranges = (starts4, r4) if ip.version == 4 else (starts6, r6)
     if not ranges:
@@ -349,7 +376,10 @@ def build_outbound(uri: str):
         return None, None, "allowInsecure"
 
     net = q.get("type", "tcp")
-    sec = q.get("security", "none")
+    # trojan 天生就是 TLS 协议，URI 里常省略 security 参数；Xray 26 起会直接拒绝
+    # 「trojan + security:none」的配置（报 "trojan without TLS is prohibited"），
+    # 不补默认值会把这类节点全部误判成不可用（实测 22 个启动失败里有 15 个是它）。
+    sec = q.get("security") or ("tls" if scheme == "trojan" else "none")
     stream = {"network": net, "security": "none"}
     if net == "ws":
         # Xray 26 起 headers.Host 已废弃，改用独立的 host 字段
@@ -392,6 +422,19 @@ def build_outbound(uri: str):
             st["tlsSettings"] = {"serverName": o.get("host") or o.get("add")}
         return ob, st, None
 
+    if scheme in ("socks", "socks5", "socks4"):
+        if "@" in core:
+            cred, hp = core.rsplit("@", 1)
+            user, _, pwd = urllib.parse.unquote(cred).partition(":")
+        else:
+            user, pwd, hp = "", "", core
+        h, p = hp.rsplit(":", 1)
+        srv = {"address": _bare_host(h), "port": int(p)}
+        if user:
+            srv["users"] = [{"user": user, "pass": pwd}]
+        return ({"protocol": "socks", "settings": {"servers": [srv]}},
+                {"network": "tcp", "security": "none"}, None)
+
     if "@" not in core:
         return None, None, "缺少 userinfo"
     cred, hp = core.rsplit("@", 1)
@@ -406,11 +449,11 @@ def build_outbound(uri: str):
 
 
 def verify_node(args):
-    """穿节点取 VERIFY_URL，返回 (line, ms, err)。"""
-    idx, (line, _tcp_ms) = args
+    """穿节点取 verify 地址，返回 (line, url, ms, err)。"""
+    idx, line, url, expect = args
     ob, stream, err = build_outbound(line)
     if err:
-        return line, None, err
+        return line, url, None, err
     ob["tag"] = "proxy"
     ob["streamSettings"] = stream
     # 每个节点独占一个端口：早期版本按 worker 槽位复用端口，前一个 xray 还没释放就冲突，
@@ -435,18 +478,18 @@ def verify_node(args):
                 break
             except Exception:
                 if proc.poll() is not None:
-                    return line, None, "xray 启动失败"
+                    return line, url, None, "xray 启动失败"
                 time.sleep(0.2)
         t0 = time.time()
         r = subprocess.run(["curl", "-s", "-o", os.devnull, "-w", "%{http_code}",
                             "--socks5-hostname", f"127.0.0.1:{local}",
-                            "--max-time", str(VERIFY_TIMEOUT), VERIFY_URL],
+                            "--max-time", str(VERIFY_TIMEOUT), url],
                            capture_output=True, text=True)
         code = (r.stdout or "").strip()
         ms = (time.time() - t0) * 1000
-        return (line, ms, None) if code == "204" else (line, None, f"HTTP {code or '超时'}")
+        return (line, url, ms, None) if code == expect else (line, url, None, f"HTTP {code or '超时'}")
     except Exception as e:
-        return line, None, type(e).__name__
+        return line, url, None, type(e).__name__
     finally:
         if proc:
             proc.terminate()
@@ -468,7 +511,7 @@ async def main() -> int:
     status = load_status()
     raw_lines = []
     print(f"[source] 共 {len(sources)} 个源，逐个体检")
-    for url in sources:
+    for url, scope in sources:
         st = status.setdefault(url, {"ok_streak": 0, "fail_streak": 0, "last_nodes": 0})
         got, valid, err = [], 0, None
         try:
@@ -490,7 +533,7 @@ async def main() -> int:
             st["last_nodes"] = valid
             st.pop("last_error", None)
             print(f"[source] ✓ {src_name(url):<32} {len(got):>4} 行（有效 {valid}）")
-            raw_lines.extend(got)
+            raw_lines.extend((l, scope) for l in got)
 
     # 连续失败达阈值 → 自动停用，避免每轮都为死源白等
     for url, st in list(status.items()):
@@ -504,8 +547,8 @@ async def main() -> int:
         print("[abort] 所有源都没拿到东西，保持原文件不动", file=sys.stderr)
         return 1
 
-    seen, cand = set(), []
-    for line in raw_lines:
+    seen = {}
+    for line, scope in raw_lines:
         parsed = parse_node(line)
         if not parsed:
             continue
@@ -514,72 +557,110 @@ async def main() -> int:
             continue
         key = (host, port)
         if key in seen:
+            if seen[key][3] is not None and scope is None:
+                seen[key] = (seen[key][0], host, port, None)
             continue
-        seen.add(key)
-        cand.append((line, host, port))
+        seen[key] = (line, host, port, scope)
+    cand = list(seen.values())
     print(f"[parse] 原始 {len(raw_lines)} 行 → 去重去垃圾后 {len(cand)} 个候选")
 
-    if COUNTRY:
-        idx = build_country_index(COUNTRY)
-        kept, n_dom, n_cdn, n_other = [], 0, 0, 0
-        for c in cand:
-            ip = _direct_ip(c[1])
-            if ip is None:
-                n_dom += 1
+    # 地区归属：一个 IP 只属于一个国家/地区码，但一个分组可以包含多个地区码（如港台）
+    indexes = build_region_indexes(sorted({c for r in REGIONS.values() for c in r["codes"]}))
+    by_region = {slug: [] for slug in REGIONS}
+    n_dom = n_cdn = n_other = 0
+    for c in cand:
+        ip = _direct_ip(c[1])
+        if ip is None:
+            n_dom += 1
+            continue
+        if _is_cdn(ip):
+            n_cdn += 1
+            continue
+        scope = c[3]
+        hit = False
+        for slug, r in REGIONS.items():
+            if scope and slug != scope:
                 continue
-            if _is_cdn(ip):
-                n_cdn += 1
-                continue
-            if in_country(ip, idx):
-                kept.append(c)
-            else:
-                n_other += 1
-        print(f"[geoip] {len(cand)} 候选 → 域名(不可判) {n_dom} · CDN段 {n_cdn} · 非{COUNTRY} {n_other}"
-              f" → 保留 {len(kept)}")
-        cand = kept
+            if any(in_region(ip, indexes[code]) for code in r["codes"]):
+                by_region[slug].append(c)
+                hit = True
+        if not hit:
+            n_other += 1
+    print(f"[geoip] {len(cand)} 候选 → 域名(不可判) {n_dom} · CDN段 {n_cdn} · 其它国家 {n_other}")
+    for slug, items in by_region.items():
+        print(f"[geoip]   {REGIONS[slug]['label']}({slug})：{len(items)} 个候选")
 
+    # 分组之间可能包含同一节点 → 探测与验证都先去重，别重复占端口
+    uniq = {}
+    for items in by_region.values():
+        for item in items:
+            uniq[(item[1], item[2])] = item
+    cand = list(uniq.values())
     if not cand:
-        print(f"[abort] 过滤后没有候选节点，保持原文件不动", file=sys.stderr)
+        print("[abort] 没有任何地区的候选节点，保持原文件不动", file=sys.stderr)
         return 1
 
     sem = asyncio.Semaphore(CONCURRENCY)
-    results = await asyncio.gather(*(probe(h, p, sem) for _, h, p in cand))
-    alive = [(line, ms) for (line, _, _), ms in zip(cand, results) if ms is not None]
+    results = await asyncio.gather(*(probe(h, p, sem) for _, h, p, _s in cand))
+    alive = {(h, p): ms for (_, h, p, _s), ms in zip(cand, results) if ms is not None}
     print(f"[probe] TCP 存活 {len(alive)} 个（超时 {TIMEOUT}s，并发 {CONCURRENCY}）")
-
     if not alive:
         print("[abort] 没有一个 TCP 存活，保持原文件不动", file=sys.stderr)
         return 1
 
     # 真实代理验证：TCP 通 ≠ 能用（公共免费节点里绝大多数是端口开着但配置已失效）
-    print(f"[verify] 对 {len(alive)} 个做真实代理验证（并发 {VERIFY_WORKERS}）")
-    working, reasons = [], {}
+    # 键里带验证地址：不同地区的大陆可达性不同，同一节点可能要按各自的目标各验一次
+    jobs = {}
+    for slug, items in by_region.items():
+        url, expect = REGIONS[slug]["verify"]
+        for line, h, p, _s in items:
+            if (h, p) in alive:
+                jobs[(line, url)] = expect
+    print(f"[verify] 对 {len(jobs)} 个做真实代理验证（并发 {VERIFY_WORKERS}）")
+
+    ok, reasons = {}, {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as ex:
-        for line, ms, err in ex.map(verify_node, enumerate(alive)):
+        args = [(i, line, url, expect) for i, ((line, url), expect) in enumerate(jobs.items())]
+        for line, url, ms, err in ex.map(verify_node, args):
             if ms is not None:
-                working.append((line, ms))
+                ok[(line, url)] = ms
             else:
                 reasons[err] = reasons.get(err, 0) + 1
-    print(f"[verify] 真能当代理用：{len(working)} / {len(alive)}")
+    print(f"[verify] 真能当代理用：{len(ok)} / {len(jobs)}")
     if reasons:
         top = "，".join(f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1])[:5])
         print(f"[verify] 失败原因：{top}")
-
-    if not working:
+    if not ok:
         print("[abort] 没有一个能真正代理，保持原文件不动", file=sys.stderr)
         return 1
 
     # ⚠️ 这个延迟是**探测点（机房）**的数字，对本地没有参考价值；排序只为输出稳定
-    working.sort(key=lambda x: x[1])
-    keep = working[:MAX_NODES]
-    plain = "\n".join(line for line, _ in keep) + "\n"
-    (ROOT / "sub-plain.txt").write_text(plain, encoding="utf-8")
-    (ROOT / "sub.txt").write_text(
-        base64.b64encode(plain.encode("utf-8")).decode("ascii"), encoding="utf-8"
-    )
-    scope = f"仅 {COUNTRY}" if COUNTRY else "不过滤国家"
-    print(f"[write] {scope}；保留 {len(keep)} 个"
-          f"（最快 {keep[0][1]:.0f}ms / 最慢 {keep[-1][1]:.0f}ms）")
+    written = []
+    for slug, r in REGIONS.items():
+        url, _expect = r["verify"]
+        got = [(line, ok[(line, url)]) for line, _h, _p, _s in by_region[slug]
+               if (line, url) in ok]
+        got.sort(key=lambda x: x[1])
+        got = got[:MAX_NODES]
+        if not got:
+            print(f"[write] {r['label']}({slug})：0 个可用 → 不动旧文件")
+            continue
+        plain = "\n".join(line for line, _ in got) + "\n"
+        (ROOT / f"sub-{slug}-plain.txt").write_text(plain, encoding="utf-8")
+        (ROOT / f"sub-{slug}.txt").write_text(
+            base64.b64encode(plain.encode("utf-8")).decode("ascii"), encoding="utf-8")
+        written.append(slug)
+        print(f"[write] {r['label']}({slug})：{len(got)} 个"
+              f"（最快 {got[0][1]:.0f}ms / 最慢 {got[-1][1]:.0f}ms）")
+
+    # 老订阅地址 sub.txt 只装 LEGACY_ALIAS 那个地区，已订阅的客户端行为不变
+    if LEGACY_ALIAS in written:
+        for name in (f"sub-{LEGACY_ALIAS}.txt", f"sub-{LEGACY_ALIAS}-plain.txt"):
+            shutil.copyfile(ROOT / name, ROOT / name.replace(f"-{LEGACY_ALIAS}", "", 1))
+
+    if not written:
+        print("[abort] 所有地区都没有可用节点，保持原文件不动", file=sys.stderr)
+        return 1
     return 0
 
 

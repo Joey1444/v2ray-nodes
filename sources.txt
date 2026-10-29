@@ -16,3 +16,11 @@ https://raw.githubusercontent.com/free18/v2ray/main/v.txt
 https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt
 https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt
 https://raw.githubusercontent.com/mfuu/v2ray/master/sub
+
+# ---- 地区限定源：行首 [cn] = 这个源只喂给大陆那份订阅 ----
+# 公开「翻墙订阅」里几乎没有大陆节点（大陆服务器出口就在大陆，翻不了墙，没人分享）。
+# 能拿到大陆 IP 的只有公开代理池，它们是裸 socks/http 代理、不是 vmess/vless。
+# 实测（2026-10-29）：proxifly 的 CN 文件 685 条，541 条 socks，端口可达 180，
+# 真能穿 HTTPS 的只有个位数；且大量条目只转发明文 HTTP，必须用 HTTPS 验证才筛得出来。
+# 客户端侧：v2rayN 认 socks:// 但不认 http://（没有 HttpFmt），所以只输出 socks 条目。
+[cn] https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/CN/data.txt
