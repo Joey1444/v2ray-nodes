@@ -1,38 +1,38 @@
 {
   "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/sub": {
-    "fail_streak": 2,
+    "fail_streak": 3,
     "last_error": "拿不到有效节点行",
     "last_nodes": 85,
     "ok_streak": 0
   },
   "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt": {
     "fail_streak": 0,
-    "last_nodes": 453,
-    "ok_streak": 69
+    "last_nodes": 477,
+    "ok_streak": 70
   },
   "https://raw.githubusercontent.com/free18/v2ray/main/v.txt": {
     "fail_streak": 0,
     "last_nodes": 234,
-    "ok_streak": 69
+    "ok_streak": 70
   },
   "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt": {
     "fail_streak": 0,
     "last_nodes": 200,
-    "ok_streak": 69
+    "ok_streak": 70
   },
   "https://raw.githubusercontent.com/mfuu/v2ray/master/sub": {
     "fail_streak": 0,
-    "last_nodes": 119,
-    "ok_streak": 69
+    "last_nodes": 124,
+    "ok_streak": 70
   },
   "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt": {
     "fail_streak": 0,
-    "last_nodes": 440,
-    "ok_streak": 69
+    "last_nodes": 477,
+    "ok_streak": 70
   },
   "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/CN/data.txt": {
     "fail_streak": 0,
-    "last_nodes": 338,
-    "ok_streak": 7
+    "last_nodes": 336,
+    "ok_streak": 8
   }
 }
