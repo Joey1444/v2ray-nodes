@@ -11,7 +11,7 @@
 #   yebekhe / soroushmirzaei / lalatina169 / vveg26 仓库已不存在（404）
 
 https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt
-https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/sub
+# DISABLED auto https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/sub
 https://raw.githubusercontent.com/free18/v2ray/main/v.txt
 https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt
 https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt
