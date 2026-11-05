@@ -8,32 +8,32 @@
   },
   "https://raw.githubusercontent.com/chengaopan/AutoMergePublicNodes/master/list.txt": {
     "fail_streak": 0,
-    "last_nodes": 460,
-    "ok_streak": 80
+    "last_nodes": 469,
+    "ok_streak": 81
   },
   "https://raw.githubusercontent.com/free18/v2ray/main/v.txt": {
     "fail_streak": 0,
-    "last_nodes": 223,
-    "ok_streak": 80
+    "last_nodes": 158,
+    "ok_streak": 81
   },
   "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity.txt": {
     "fail_streak": 0,
     "last_nodes": 200,
-    "ok_streak": 80
+    "ok_streak": 81
   },
   "https://raw.githubusercontent.com/mfuu/v2ray/master/sub": {
     "fail_streak": 0,
-    "last_nodes": 196,
-    "ok_streak": 80
+    "last_nodes": 142,
+    "ok_streak": 81
   },
   "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt": {
     "fail_streak": 0,
-    "last_nodes": 460,
-    "ok_streak": 80
+    "last_nodes": 469,
+    "ok_streak": 81
   },
   "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/CN/data.txt": {
     "fail_streak": 0,
-    "last_nodes": 348,
-    "ok_streak": 18
+    "last_nodes": 347,
+    "ok_streak": 19
   }
 }
